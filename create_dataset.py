@@ -1,106 +1,68 @@
-import re
 import pandas as pd
 from bs4 import BeautifulSoup
-import sys
+import glob
 import os
+import numpy as np
 
-def extract_data_from_file(file_path):
-    """Extrae los datos clave de un archivo XLS con estructura HTML"""
-    encodings = ['utf-8', 'latin-1', 'cp1252']
-    
-    for encoding in encodings:
-        try:
-            with open(file_path, 'r', encoding=encoding) as f:
-                content = f.read()
+def extract_all_from_html(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # 1) Localizar la tabla de resultados por su id parcial "dgResultado"
+    table = soup.find('table', id=lambda x: x and 'dgResultado' in x)
+    if table is None:
+        return []
+
+    rows = table.find_all('tr')
+
+    # 2) Encontrar el índice de la fila de encabezados (la que contiene "CODIGO")
+    header_idx = None
+    for i, row in enumerate(rows):
+        texts = [c.get_text(strip=True).upper() for c in row.find_all(['td','th'])]
+        # buscamos la fila cuyo segundo elemento sea "CODIGO"
+        if len(texts) > 1 and texts[1] in ('CODIGO','CÓDIGO'):
+            header_idx = i
             break
-        except UnicodeDecodeError:
+    if header_idx is None:
+        return []
+
+    # 3) Extraer nombres de columnas (omitimos la primera celda vacía)
+    header_cells = rows[header_idx].find_all(['td','th'])
+    headers = [c.get_text(strip=True) for c in header_cells][1:]
+
+    # 4) Recorrer cada fila de datos tras el encabezado
+    records = []
+    for row in rows[header_idx+1:]:
+        cells = row.find_all('td')
+        # descartamos líneas cortas (por ejemplo, paginador u otras)
+        if len(cells) < len(headers) + 1:
             continue
-    else:
-        raise ValueError(f"No se pudo decodificar el archivo {file_path}")
 
-    soup = BeautifulSoup(content, 'html.parser')
-    text = soup.get_text()
-    
-    # Diccionario para almacenar los datos extraídos
-    data = {
-        'Código': None,
-        'Departamento': None,
-        'Municipio': None,
-        'Establecimiento': None,
-        'Dirección': None,
-        'Teléfono': None,
-        'Distrito Supervisión': None,
-        'Supervisor': None,
-        'Director': None,
-        'Departamental': None,
-        'Nivel': None,
-        'Sector': None,
-        'Area': None,
-        'Jornada': None,
-        'Plan': None,
-        'Modalidad': None,
-        'Estado Actual': None
-    }
-    
-    # Patrones mejorados para extracción precisa
-    patterns = {
-        'Código': r'Código\s+(\d{2}-\d{2}-\d{4}-\d{2})',
-        'Departamento': r'Departamento\s+([^\n]+?)\s*Municipio',
-        'Municipio': r'Municipio\s+([^\n]+?)\s*Establecimiento',
-        'Establecimiento': r'Establecimiento\s+([^\n]+?)\s*Dirección',
-        'Dirección': r'Dirección\s+([^\n]+?)\s*Teléfono',
-        'Teléfono': r'Teléfono\s+([^\n]+?)\s*Distrito Supervisión',
-        'Distrito Supervisión': r'Distrito Supervisión\s+([^\n]+?)\s*Supervisor',
-        'Supervisor': r'Supervisor\s+([^\n]+?)\s*Director',
-        'Director': r'Director\s+([^\n]+?)\s*Departamental',
-        'Departamental': r'Departamental\s+([^\n]+?)\s*Nivel:',
-        'Nivel': r'Nivel:\s+([^\n]+?)\s*Sector:',
-        'Sector': r'Sector:\s+([^\n]+?)\s*Area:',
-        'Area': r'Area:\s+([^\n]+?)\s*Jornada:',
-        'Jornada': r'Jornada:\s+([^\n]+?)\s*Plan:',
-        'Plan': r'Plan:\s+([^\n]+?)\s*Modalidad:',
-        'Modalidad': r'Modalidad:\s+([^\n]+?)\s*Estado Actual:',
-        'Estado Actual': r'Estado Actual:\s+([^\n]+)'
-    }
-    
-    for field, pattern in patterns.items():
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            data[field] = match.group(1).strip()
-    
-    return data
+        # tomamos justo las siguientes len(headers) celdas
+        vals = [c.get_text(strip=True) for c in cells[1:1+len(headers)]]
+        # reemplazamos '' o '--' por NaN
+        vals = [np.nan if v in ('','--') else v for v in vals]
 
-def process_files(file_paths, output_csv):
-    """Procesa múltiples archivos y guarda los resultados en un CSV"""
+        record = dict(zip(headers, vals))
+        records.append(record)
+
+    return records
+
+def process_html_dir(input_dir, output_csv):
+    html_files = glob.glob(os.path.join(input_dir, '*.htm*'))
     all_data = []
-    
-    for file_path in file_paths:
-        try:
-            print(f"Procesando archivo: {file_path}")
-            data = extract_data_from_file(file_path)
-            all_data.append(data)
-        except Exception as e:
-            print(f"Error al procesar {file_path}: {str(e)}")
-    
+    for fn in html_files:
+        with open(fn, 'r', encoding='utf-8', errors='ignore') as f:
+            html = f.read()
+        all_data.extend(extract_all_from_html(html))
+
     if all_data:
         df = pd.DataFrame(all_data)
         df.to_csv(output_csv, index=False, encoding='utf-8-sig')
-        print(f"\nDatos guardados en {output_csv}")
-        print(f"Total de registros procesados: {len(all_data)}")
+        print(f"Guardados {len(all_data)} registros en {output_csv}")
     else:
-        print("No se encontraron datos para exportar.")
+        print("No se extrajo ningún registro.")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Uso: python create_dataset.py directorio output.csv")
-    else:
-        input_path = sys.argv[1]
-        output_file = sys.argv[2] if sys.argv[2].endswith('.csv') else sys.argv[2] + '.csv'
-        
-        if os.path.isdir(input_path):
-            input_files = [os.path.join(input_path, f) for f in os.listdir(input_path) 
-                         if f.lower().endswith('.xls')]
-        else:
-            input_files = [input_path]
-        
-        process_files(input_files, output_file)
+    carpeta_html = r"C:\Users\irvin\UVG\Octavo_Semestre\Data_Science\DS_PROY1\htmls"
+    destino_csv  = "establecimientos.csv"
+    process_html_dir(carpeta_html, destino_csv)
